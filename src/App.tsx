@@ -57,7 +57,7 @@ type Page =
     try {
       setErrorMessage("");
       const response = await fetch(
-        "http://localhost:5000/api/reports"
+        "https://vayudrishti-sih069-2.onrender.com/api/reports"
       );
 
       if (!response.ok) {
@@ -88,7 +88,7 @@ type Page =
   async function refreshIMDFeed() {
     try {
       setLoading(true);
-      const response = await fetch("http://localhost:5000/api/ingest/imd-rss", {
+      const response = await fetch("https://vayudrishti-sih069-2.onrender.com/api/ingest/imd-rss", {
         method: "POST",
       });
 
@@ -261,7 +261,7 @@ function IndiaMapPage() {
   async function loadReports() {
     try {
       const response = await fetch(
-       "http://127.0.0.1:5000/api/reports"
+       "https://vayudrishti-sih069-2.onrender.com/api/reports"
       );
 
       const data = await response.json();
@@ -302,7 +302,7 @@ function IndiaMapPage() {
       }
 
       const resp = await fetch(
-        "http://localhost:5000/api/weather/india-live"
+        "https://vayudrishti-sih069-2.onrender.com/api/weather/india-live"
       );
 
       const data = await resp.json();
@@ -394,7 +394,7 @@ function IndiaMapPage() {
 }
 function AnalyticsPage() { const [reports, setReports] = useState<any[]>([]);
    const [loading, setLoading] = useState(true);
-    async function loadReports() { try { const response = await fetch( "http://localhost:5000/api/reports" ); const data = await response.json(); if (data.success) { setReports(data.reports); } } catch (error) { console.error("Failed to load analytics:", error); } finally { setLoading(false); } } useEffect(() => { loadReports(); }, []); const totalReports = reports.length;
+    async function loadReports() { try { const response = await fetch( "https://vayudrishti-sih069-2.onrender.com/api/reports" ); const data = await response.json(); if (data.success) { setReports(data.reports); } } catch (error) { console.error("Failed to load analytics:", error); } finally { setLoading(false); } } useEffect(() => { loadReports(); }, []); const totalReports = reports.length;
     const verifiedReports = reports.filter(
   (report) =>
     report.verification_status === "verified" &&
@@ -428,7 +428,7 @@ function AnalyticsPage() { const [reports, setReports] = useState<any[]>([]);
   const [collapsed, setCollapsed] = useState(false);
     useEffect(() => {
     const eventSource = new EventSource(
-      "http://localhost:5000/api/events"
+      "https://vayudrishti-sih069-2.onrender.com/api/events"
     );
 
     eventSource.addEventListener("new_report", (event) => {
@@ -528,7 +528,7 @@ function LiveWeatherPage() {
       setError("");
 
       const response = await fetch(
-        "http://localhost:5000/api/weather/india-live"
+        "https://vayudrishti-sih069-2.onrender.com/api/weather/india-live"
       );
 
       const data = await response.json();
@@ -811,7 +811,7 @@ function IndiaWeatherMap({
                 )}
                 {report.image_url && (
                   <img
-                    src={`http://localhost:5000${report.image_url}`}
+                    src={`https://vayudrishti-sih069-2.onrender.com${report.image_url}`}
                     alt={report.title || "Weather report"}
                     style={{
                       width: "100%",
@@ -1005,7 +1005,7 @@ const [locationFilter, setLocationFilter] = useState("all");
 async function loadReports() {
   try {
     const response = await fetch(
-      "http://localhost:5000/api/reports"
+      "https://vayudrishti-sih069-2.onrender.com/api/reports"
     );
 
     const data = await response.json();
@@ -1049,7 +1049,7 @@ useEffect(() => {
 
 async function loadRecentUpdates() {
   try {
-    const resp = await fetch("http://localhost:5000/api/weather/alerts");
+    const resp = await fetch("https://vayudrishti-sih069-2.onrender.com/api/weather/alerts");
 
     if (!resp.ok) {
       setRecentAlerts([]);
@@ -1073,7 +1073,7 @@ async function loadLiveWeather() {
     setLoadingWeather(true);
 
     const response = await fetch(
-      "http://localhost:5000/api/weather/india-live"
+      "https://vayudrishti-sih069-2.onrender.com/api/weather/india-live"
     );
 
     const data = await response.json();
@@ -1212,7 +1212,7 @@ const filteredLiveWeather = normalizedLocationSearchText
     }
 
     const response = await fetch(
-      "http://localhost:5000/api/reports",
+      "https://vayudrishti-sih069-2.onrender.com/api/reports",
       {
         method: "POST",
         body: formData,
@@ -1768,12 +1768,12 @@ const filteredLiveWeather = normalizedLocationSearchText
                       <div className="local-report-media">
                         {report.image_url && (
                           <img
-                            src={`http://localhost:5000${report.image_url}`}
+                            src={`https://vayudrishti-sih069-2.onrender.com${report.image_url}`}
                             alt={report.title || "Weather report image"}
                           />
                         )}
                         {report.video_url && (
-                          <video controls src={`http://localhost:5000${report.video_url}`} />
+                          <video controls src={`https://vayudrishti-sih069-2.onrender.com${report.video_url}`} />
                         )}
                       </div>
 
@@ -1829,7 +1829,7 @@ function AdminPanel() {
       setLoading(true);
 
       const response = await fetch(
-        "http://localhost:5000/api/reports"
+        "https://vayudrishti-sih069-2.onrender.com/api/reports"
       );
 
       const data = await response.json();
@@ -1962,7 +1962,7 @@ function AdminReport({
 
     try {
       const response = await fetch(
-        `http://localhost:5000/api/reports/${report.id}/verify`,
+        `https://vayudrishti-sih069-2.onrender.com/api/reports/${report.id}/verify`,
         {
           method: "PUT",
           headers: {
@@ -2014,7 +2014,7 @@ function AdminReport({
     <small>📷 Photo attached</small>
 
     <img
-      src={`http://localhost:5000${report.image_url}`}
+      src={`https://vayudrishti-sih069-2.onrender.com${report.image_url}`}
       alt="Weather report"
       className="report-media-thumb"
     />
@@ -2026,7 +2026,7 @@ function AdminReport({
     <small>🎥 Video attached</small>
 
     <video
-      src={`http://localhost:5000${report.video_url}`}
+      src={`https://vayudrishti-sih069-2.onrender.com${report.video_url}`}
       controls
       className="report-media-video"
     />
@@ -2125,7 +2125,7 @@ function ReportsPage() {
   async function loadReports() {
     try {
       const response = await fetch(
-        "http://localhost:5000/api/reports"
+        "https://vayudrishti-sih069-2.onrender.com/api/reports"
       );
 
       const data = await response.json();
@@ -2146,7 +2146,7 @@ function ReportsPage() {
   ) {
     try {
       const response = await fetch(
-        `http://localhost:5000/api/reports/${id}/verify`,
+        `https://vayudrishti-sih069-2.onrender.com/api/reports/${id}/verify`,
         {
           method: "PUT",
           headers: {
@@ -2553,7 +2553,7 @@ function SourcesPage() {
   async function loadSources() {
     try {
       const response = await fetch(
-        "http://localhost:5000/api/sources"
+        "https://vayudrishti-sih069-2.onrender.com/api/sources"
       );
 
       const data = await response.json();
@@ -2654,7 +2654,7 @@ function SettingsPage() {
 
     try {
       const healthResponse = await fetch(
-        "http://localhost:5000/api/health"
+        "https://vayudrishti-sih069-2.onrender.com/api/health"
       );
 
       if (healthResponse.ok) {
@@ -2672,7 +2672,7 @@ function SettingsPage() {
 
     try {
       const sourcesResponse = await fetch(
-        "http://localhost:5000/api/sources"
+        "https://vayudrishti-sih069-2.onrender.com/api/sources"
       );
 
       const sourcesData = await sourcesResponse.json();
