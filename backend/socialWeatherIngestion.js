@@ -338,7 +338,8 @@ async function ingestSocialWeather() {
 if (report) {
   reports.push(report);
   inserted++;
-}      } catch (error) {
+}
+      } catch (error) {
           console.error(
             `Social report processing error:`,
             error.message

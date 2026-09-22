@@ -7,11 +7,20 @@ const db = require("./database");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+const {
+  getIndiaLiveWeather,
+} = require("./weatherIntelligence");
+const {
+  verifyWeatherImage,
+} = require("./imageVerifier");
 const { classifyWeatherEvent } = require("./aiClassifier");
 const {
   analyzeReport,
   corroborateReport,
 } = require("./reportVerifier");
+const {
+  validateReportLocation,
+} = require("./locationValidator");
 const {
   ingestPublicWebWeather,
 } = require("./publicWebIngestion");
@@ -26,6 +35,9 @@ const { ingestIMDRSS } = require("./imdRssIngestion");
 const {
   ingestSocialWeather,
 } = require("./socialWeatherIngestion");
+const { runOrchestrator } = require("./ingestionOrchestrator");
+const { getAlerts } = require("./weatherAlerts");
+const { computeIntelligence } = require("./scoring");
 const app = express();
 const PORT = 5000;
 const sseClients = new Set();
@@ -44,6 +56,30 @@ app.get("/api/events", (req, res) => {
   req.on("close", () => {
     sseClients.delete(res);
   });
+});
+app.get("/api/weather/india-live", async (req, res) => {
+  try {
+    const weather = await getIndiaLiveWeather();
+
+    res.json({
+      success: true,
+      source: "Open-Meteo",
+      generated_at: new Date().toISOString(),
+      count: weather.length,
+      weather,
+    });
+  } catch (error) {
+    console.error(
+      "India live weather error:",
+      error
+    );
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch India live weather",
+      error: error.message,
+    });
+  }
 });
 
 function broadcastEvent(event, data) {
@@ -96,6 +132,132 @@ app.get("/api/health", (req, res) => {
     database: "connected",
     message: "VayuDrishti backend is running",
   });
+});
+
+app.post("/api/dev/sample-events", (req, res) => {
+  try {
+    const sampleReports = [
+      {
+        source_type: "demo",
+        source_name: "Demo Seed",
+        title: "Heavy Rainfall Across Jaipur",
+        description: "Intense showers caused waterlogging in low-lying areas of Jaipur and surrounding roads.",
+        event_category: "rainfall",
+        severity: "high",
+        city: "Jaipur",
+        state: "Rajasthan",
+        latitude: 26.9124,
+        longitude: 75.7873,
+        event_time: new Date().toISOString(),
+        verification_status: "verified",
+        risk_score: 82,
+        risk_level: "High",
+        verification_recommendation: "Escalate to district monitoring unit",
+      },
+      {
+        source_type: "demo",
+        source_name: "Demo Seed",
+        title: "Thunderstorm Activity in Mumbai",
+        description: "Lightning and gusty winds were reported across coastal areas of Mumbai during evening hours.",
+        event_category: "thunderstorm",
+        severity: "medium",
+        city: "Mumbai",
+        state: "Maharashtra",
+        latitude: 19.076,
+        longitude: 72.8777,
+        event_time: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        verification_status: "pending",
+        risk_score: 64,
+        risk_level: "Moderate",
+        verification_recommendation: "Confirm with local weather station",
+      },
+      {
+        source_type: "demo",
+        source_name: "Demo Seed",
+        title: "Heatwave Conditions in Delhi",
+        description: "Afternoon temperatures remained unusually high with heat stress advisories issued for vulnerable groups.",
+        event_category: "heatwave",
+        severity: "high",
+        city: "Delhi",
+        state: "Delhi",
+        latitude: 28.6139,
+        longitude: 77.209,
+        event_time: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
+        verification_status: "verified",
+        risk_score: 76,
+        risk_level: "High",
+        verification_recommendation: "Activate public health warning",
+      },
+      {
+        source_type: "demo",
+        source_name: "Demo Seed",
+        title: "Flooding Risk in Kolkata",
+        description: "Sustained rainfall raised water levels in several drainage channels around Kolkata suburbs.",
+        event_category: "flooding",
+        severity: "critical",
+        city: "Kolkata",
+        state: "West Bengal",
+        latitude: 22.5726,
+        longitude: 88.3639,
+        event_time: new Date(Date.now() - 9 * 60 * 60 * 1000).toISOString(),
+        verification_status: "pending",
+        risk_score: 91,
+        risk_level: "Critical",
+        verification_recommendation: "Coordinate emergency response",
+      }
+    ];
+
+    const insert = db.prepare(`
+      INSERT INTO reports (
+        source_type,
+        source_name,
+        title,
+        description,
+        event_category,
+        severity,
+        city,
+        state,
+        latitude,
+        longitude,
+        event_time,
+        verification_status,
+        risk_score,
+        risk_level,
+        verification_recommendation
+      ) VALUES (
+        @source_type,
+        @source_name,
+        @title,
+        @description,
+        @event_category,
+        @severity,
+        @city,
+        @state,
+        @latitude,
+        @longitude,
+        @event_time,
+        @verification_status,
+        @risk_score,
+        @risk_level,
+        @verification_recommendation
+      )
+    `);
+
+    const inserted = sampleReports.map((report) => insert.run(report).lastInsertRowid);
+
+    res.json({
+      success: true,
+      inserted: inserted.length,
+      message: "Sample weather events added successfully.",
+    });
+  } catch (error) {
+    console.error("Sample events creation error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to create sample events.",
+      error: error.message,
+    });
+  }
 });
 app.get("/api/sources", (req, res) => {
   res.json({
@@ -329,30 +491,142 @@ app.post(
     { name: "photo", maxCount: 1 },
     { name: "video", maxCount: 1 },
   ]),
-  (req, res) => {
+  async (req, res) => {
     const photoFile = req.files?.photo?.[0];
 const videoFile = req.files?.video?.[0];
+    const imageUrl = photoFile
+      ? `/uploads/${photoFile.filename}`
+      : null;
+    const videoUrl = videoFile
+      ? `/uploads/${videoFile.filename}`
+      : null;
 
-const imageUrl = photoFile
-  ? `/uploads/${photoFile.filename}`
-  : null;
+    const {
+      source_type,
+      source_name,
+      title,
+      description,
+      event_category,
+      severity,
+      city,
+      state,
+      latitude,
+      longitude,
+      event_time,
+    } = req.body;
 
-const videoUrl = videoFile
-  ? `/uploads/${videoFile.filename}`
-  : null;
-  const {
-    source_type,
-    source_name,
-    title,
-    description,
-    event_category,
-    severity,
+    let imageVerification = null;
+
+    if (photoFile?.path) {
+      try {
+        imageVerification = await verifyWeatherImage({
+          imagePath: photoFile.path,
+          eventCategory: event_category,
+          title,
+          description,
+        });
+
+        console.log("IMAGE AI VERIFICATION:", imageVerification);
+      } catch (error) {
+        console.error("Image AI verification error:", error);
+
+        if (photoFile?.path && fs.existsSync(photoFile.path)) {
+          fs.unlinkSync(photoFile.path);
+        }
+
+        if (videoFile?.path && fs.existsSync(videoFile.path)) {
+          fs.unlinkSync(videoFile.path);
+        }
+
+        return res.status(503).json({
+          success: false,
+          code: "IMAGE_VERIFICATION_UNAVAILABLE",
+          message:
+            "Image verification service is currently unavailable. Report was not submitted.",
+        });
+      }
+
+      if (!imageVerification.is_weather_related || imageVerification.confidence < 0.6) {
+        if (photoFile?.path && fs.existsSync(photoFile.path)) {
+          fs.unlinkSync(photoFile.path);
+        }
+
+        if (videoFile?.path && fs.existsSync(videoFile.path)) {
+          fs.unlinkSync(videoFile.path);
+        }
+
+        return res.status(400).json({
+          success: false,
+          code: "IMAGE_NOT_WEATHER_RELATED",
+          message: "The uploaded image does not appear to show a weather-related event.",
+          image_verification: imageVerification,
+        });
+      }
+    }
+  let locationValidation;
+
+try {
+  locationValidation = await validateReportLocation({
     city,
     state,
     latitude,
     longitude,
-    event_time,
-  } = req.body;
+    photoPath: photoFile?.path || null,
+     event_time,
+
+  });
+
+  console.log(
+    "LOCATION VALIDATION:",
+    locationValidation
+  );
+} catch (error) {
+  console.error(
+    "Location validation error:",
+    error
+  );
+
+  return res.status(503).json({
+    success: false,
+    code: "LOCATION_VALIDATION_UNAVAILABLE",
+    message:
+      "Location verification service is currently unavailable. Report was not submitted.",
+  });
+}
+const RELAX_LOCATION =
+  (process.env.RELAX_LOCATION_VALIDATION || "").toLowerCase() === "1" ||
+  (process.env.RELAX_LOCATION_VALIDATION || "").toLowerCase() === "true";
+
+if (
+  locationValidation.status === "invalid_location" ||
+  locationValidation.status === "location_mismatch" ||
+  locationValidation.status === "photo_location_mismatch"
+) {
+  if (!RELAX_LOCATION) {
+    if (photoFile?.path && fs.existsSync(photoFile.path)) {
+      fs.unlinkSync(photoFile.path);
+    }
+
+    if (videoFile?.path && fs.existsSync(videoFile.path)) {
+      fs.unlinkSync(videoFile.path);
+    }
+
+    return res.status(400).json({
+      success: false,
+      code: locationValidation.status,
+      message: locationValidation.message,
+      location_validation: locationValidation,
+    });
+  } else {
+    console.warn(
+      "Location validation failed but RELAX_LOCATION_VALIDATION enabled:",
+      locationValidation
+    );
+
+    // Mark as a warning so downstream logic can record it in verification reason
+    locationValidation.warning = true;
+  }
+}
 
   // ------------------------------------------
   // AI EVENT CLASSIFICATION
@@ -382,12 +656,15 @@ const videoUrl = videoFile
   description,
   city,
   state,
+  latitude,
+  longitude,
   event_category,
 });
 
 console.log("DUPLICATE RESULT:", duplicateResult);
 
   console.log("VERIFICATION RESULT:", verificationResult);
+
   const corroborationResult = corroborateReport({
   title,
   description,
@@ -395,6 +672,24 @@ console.log("DUPLICATE RESULT:", duplicateResult);
   state,
   event_category,
 });
+if (duplicateResult.is_duplicate) {
+  if (photoFile?.path && fs.existsSync(photoFile.path)) {
+    fs.unlinkSync(photoFile.path);
+  }
+
+  if (videoFile?.path && fs.existsSync(videoFile.path)) {
+    fs.unlinkSync(videoFile.path);
+  }
+
+  return res.status(409).json({
+    success: false,
+    code: "DUPLICATE_REPORT",
+    message: "A similar weather report already exists.",
+    duplicate_of: duplicateResult.duplicate_of,
+    duplicate_score: duplicateResult.duplicate_score,
+    distance_km: duplicateResult.distance_km,
+  });
+}
 
 
 console.log("CORROBORATION RESULT:", corroborationResult);
@@ -458,7 +753,7 @@ duplicate_score
         verificationResult.risk_score,
         verificationResult.risk_level,
         verificationResult.verification_recommendation,
-        verificationResult.verification_reason,
+      `${verificationResult.verification_reason || ""} Location validation: ${locationValidation.message}`,
         corroborationResult.corroboration_score,
 corroborationResult.corroboration_status,
 corroborationResult.evidence_summary,
@@ -466,6 +761,22 @@ corroborationResult.evidence_summary,
   duplicateResult.duplicate_score
 
       );
+    // compute intelligence score and persist
+    try {
+      const reportRow = db
+        .prepare(`SELECT * FROM reports WHERE id = ?`)
+        .get(result.lastInsertRowid);
+
+      const intel = computeIntelligence(reportRow);
+
+      db.prepare(`UPDATE reports SET intelligence_score = ?, intelligence_reasons = ? WHERE id = ?`).run(
+        intel.intelligence_score,
+        intel.intelligence_reasons,
+        result.lastInsertRowid
+      );
+    } catch (e) {
+      console.error("Failed to compute/persist intelligence score:", e.message);
+    }
     broadcastEvent("new_report", {
       report_id: Number(result.lastInsertRowid),
       title,
@@ -584,4 +895,171 @@ app.listen(PORT, () => {
   console.log(
     `VayuDrishti backend running on http://localhost:${PORT}`
   );
+});
+
+// ==========================================
+// MAP DATA (combined live weather, reports, official alerts)
+// ==========================================
+
+app.get("/api/map/data", async (req, res) => {
+  try {
+    const { getIndiaWeather } = require("./weatherIngestion");
+
+    const live = await getIndiaWeather();
+
+    const reports = db
+      .prepare(`SELECT id, title, event_category, city, state, latitude, longitude, event_time, severity, verification_status, intelligence_score FROM reports ORDER BY id DESC LIMIT 200`)
+      .all();
+
+    const alertsResp = await getAlerts();
+
+    res.json({
+      success: true,
+      live_weather: live,
+      reports,
+      alerts: alertsResp.success ? alertsResp.alerts : [],
+      alerts_status: alertsResp.success ? "ok" : "unavailable",
+    });
+  } catch (error) {
+    console.error("Map data error:", error);
+
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+// ==========================================
+// UNIFIED INGESTION ORCHESTRATOR
+// ==========================================
+
+app.post("/api/ingest/orchestrator", async (req, res) => {
+  try {
+    const summary = await runOrchestrator();
+
+    // Broadcast a high-level ingestion completed event
+    broadcastEvent("ingestion_completed", {
+      timestamp: new Date().toISOString(),
+      summary,
+    });
+
+    res.json({ success: true, summary });
+  } catch (error) {
+    console.error("Orchestrator error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Unified ingestion orchestrator failed",
+      error: error.message,
+    });
+  }
+});
+
+// ==========================================
+// WEATHER ALERTS
+// ==========================================
+
+app.get("/api/weather/alerts", async (req, res) => {
+  try {
+    const alerts = await getAlerts();
+
+    if (!alerts.success) {
+      return res.status(503).json(alerts);
+    }
+
+    // Broadcast each alert as SSE (non-fabricated)
+    for (const alert of alerts.alerts || []) {
+      broadcastEvent("new_alert", {
+        title: alert.title,
+        issue_time: alert.issue_time,
+        source: alert.source,
+        url: alert.url,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    res.json(alerts);
+  } catch (error) {
+    console.error("Weather alerts error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch weather alerts",
+      error: error.message,
+    });
+  }
+});
+
+// ==========================================
+// STATS / ANALYTICS
+// ==========================================
+
+app.get("/api/stats", (req, res) => {
+  try {
+    const counts = db
+      .prepare(
+        `SELECT source_type, COUNT(*) as cnt FROM reports GROUP BY source_type`
+      )
+      .all();
+
+    const recent = db
+      .prepare(
+        `SELECT id, title, event_category, city, state, event_time, source_type, ai_confidence, source_credibility, duplicate_score, corroboration_score, severity FROM reports ORDER BY id DESC LIMIT 10`
+      )
+      .all();
+
+    // attach intelligence score for recent reports
+    const enrichedRecent = recent.map((r) => {
+      const score = computeIntelligence(r);
+
+      return {
+        ...r,
+        intelligence_score: score.intelligence_score,
+        intelligence_reasons: score.intelligence_reasons,
+      };
+    });
+
+    res.json({
+      success: true,
+      total_reports: counts.reduce((s, c) => s + c.cnt, 0),
+      counts_by_source: counts,
+      recent_reports: enrichedRecent,
+    });
+  } catch (error) {
+    console.error("Stats error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to compute stats",
+      error: error.message,
+    });
+  }
+});
+
+// Recompute intelligence scores for recent reports
+app.post("/api/reports/recompute-intelligence", (req, res) => {
+  try {
+    const rows = db
+      .prepare("SELECT id FROM reports ORDER BY id DESC LIMIT 500")
+      .all();
+
+    let updated = 0;
+
+    const stmtGet = db.prepare("SELECT * FROM reports WHERE id = ?");
+    const stmtUpdate = db.prepare(
+      "UPDATE reports SET intelligence_score = ?, intelligence_reasons = ? WHERE id = ?"
+    );
+
+    for (const row of rows) {
+      const r = stmtGet.get(row.id);
+
+      const intel = computeIntelligence(r);
+
+      stmtUpdate.run(intel.intelligence_score, intel.intelligence_reasons, row.id);
+
+      updated++;
+    }
+
+    res.json({ success: true, updated });
+  } catch (error) {
+    console.error("Recompute intelligence error:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });

@@ -6,3 +6,8 @@ backend/vayudrishti.db-shm
 backend/vayudrishti.db-wal
 dist/
 *.log
+backend/vayudrishti.db
+backend/uploads/
+*.db-shm
+*.db-wal
+vayudrishti.db

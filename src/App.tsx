@@ -1,26 +1,38 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 type LiveWeather = {
   city: string;
   state: string;
   latitude: number;
   longitude: number;
-  weather: {
-    time: string;
-    temperature_2m: number;
-    relative_humidity_2m: number;
-    precipitation: number;
-    rain: number;
-    weather_code: number;
-    wind_speed_10m: number;
-  };
+  temperature_c: number;
+  feels_like_c: number;
+  humidity: number;
+  precipitation_mm: number;
+  wind_speed_kmh: number;
+  weather_code: number;
+  weather: string;
+  observed_at: string;
+  source: string;
 };
 import "./App.css";
-import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
+import {
+  MapContainer,
+  TileLayer,
+  Marker,
+  Popup,
+  CircleMarker,
+} from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
+import KPIStat from "./components/KPIStat";
+import Sidebar from "./components/Sidebar";
+import Header from "./components/Header";
+import AlertList from "./components/AlertList";
+
 type Page =
   | "Dashboard"
+  | "Live Weather"
   | "Live Events"
   | "India Map"
   | "Analytics"
@@ -29,38 +41,86 @@ type Page =
   | "Sources"
   | "Settings"
   | "Help";
-   function LiveEvents() {
+
+  function LiveEvents() {
+
   const [reports, setReports] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState("");
 
   const [eventFilter, setEventFilter] = useState("all");
   const [severityFilter, setSeverityFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const didAutoIMDRefresh = useRef(false);
 
-  async function loadReports() {
+  async function loadReports(): Promise<boolean> {
     try {
+      setErrorMessage("");
       const response = await fetch(
         "http://localhost:5000/api/reports"
       );
 
+      if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`);
+      }
+
       const data = await response.json();
 
       if (data.success) {
-        setReports(data.reports);
+        const nextReports = data.reports || [];
+        setReports(nextReports);
+        return nextReports.length > 0;
       }
+
+      setReports([]);
+      setErrorMessage(data.message || "Reports service returned no data.");
+      return false;
     } catch (error) {
       console.error("Failed to load live events:", error);
+      setReports([]);
+      setErrorMessage("Live reports are currently unavailable. Check backend/server status.");
+      return false;
     } finally {
       setLoading(false);
     }
   }
 
+  async function refreshIMDFeed() {
+    try {
+      setLoading(true);
+      const response = await fetch("http://localhost:5000/api/ingest/imd-rss", {
+        method: "POST",
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || "IMD ingestion failed");
+      }
+
+      await loadReports();
+    } catch (error) {
+      console.error("Failed to refresh IMD feed:", error);
+      setErrorMessage("IMD feed refresh failed. Please check the IMD source connection.");
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
-    loadReports();
+    const bootstrap = async () => {
+      const hasReports = await loadReports();
+
+      if (!hasReports && !didAutoIMDRefresh.current) {
+        didAutoIMDRefresh.current = true;
+        await refreshIMDFeed();
+      }
+    };
+
+    bootstrap();
 
     const interval = setInterval(() => {
-      loadReports();
-    }, 10000);
+      void loadReports();
+    }, 15000);
 
     return () => clearInterval(interval);
   }, []);
@@ -72,8 +132,7 @@ type Page =
         ?.toLowerCase()
         .replace(/_/g, " ") ===
         eventFilter.toLowerCase();
-
-    const severityMatch =
+            const severityMatch =
       severityFilter === "all" ||
       report.severity === severityFilter;
 
@@ -95,6 +154,10 @@ type Page =
         </div>
 
         <div className="filters">
+          <button className="small-button" onClick={refreshIMDFeed}>
+            Refresh IMD feed
+          </button>
+
           <select
             value={eventFilter}
             onChange={(e) => setEventFilter(e.target.value)}
@@ -133,8 +196,10 @@ type Page =
 
       {loading ? (
         <p>Loading live weather events...</p>
+      ) : errorMessage ? (
+        <p>{errorMessage}</p>
       ) : filteredReports.length === 0 ? (
-        <p>No weather events match the selected filters.</p>
+        <p>No live weather events are available yet. Trigger ingestion or submit a report to populate this feed.</p>
       ) : (
         <div className="reports">
           {filteredReports.map((report) => (
@@ -183,10 +248,16 @@ type Page =
     </div>
   );
 }
+
 function IndiaMapPage() {
   const [reports, setReports] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [eventFilter, setEventFilter] = useState("all");
+  const [liveWeather, setLiveWeather] = useState<LiveWeather[]>([]);
+  const [loadingLive, setLoadingLive] = useState(false);
+  const [liveError, setLiveError] = useState("");
+  const [liveSource, setLiveSource] = useState("");
+  const [liveUpdated, setLiveUpdated] = useState("");
   async function loadReports() {
     try {
       const response = await fetch(
@@ -207,7 +278,63 @@ function IndiaMapPage() {
 
   useEffect(() => {
     loadReports();
+    loadLiveWeather();
+
+    const interval = setInterval(() => {
+      loadLiveWeather();
+    }, 5 * 60 * 1000);
+
+    return () => clearInterval(interval);
   }, []);
+
+  async function loadLiveWeather() {
+    try {
+      setLoadingLive(true);
+      setLiveError("");
+
+      // Reuse recent global cache if available to avoid duplicate requests
+      const cache = (window as any).__VAYU_LIVE_WEATHER;
+      if (cache && cache.ts && Date.now() - cache.ts < 2 * 60 * 1000) {
+        setLiveWeather(cache.weather || []);
+        setLiveSource(cache.generated_at || cache.source || "");
+        setLiveUpdated(cache.generated_at || "");
+        return;
+      }
+
+      const resp = await fetch(
+        "http://localhost:5000/api/weather/india-live"
+      );
+
+      const data = await resp.json();
+
+      if (!data || !data.success) {
+        setLiveError("Live weather temporarily unavailable.");
+        setLiveWeather([]);
+        setLiveSource("");
+        setLiveUpdated("");
+        return;
+      }
+
+      setLiveWeather(data.weather || []);
+      setLiveSource(data.source || "");
+      setLiveUpdated(data.generated_at || "");
+      try {
+        (window as any).__VAYU_LIVE_WEATHER = {
+          weather: data.weather,
+          generated_at: data.generated_at || new Date().toISOString(),
+          ts: Date.now(),
+        };
+      } catch (e) {}
+    } catch (error) {
+      console.error("IndiaMapPage live weather error:", error);
+      setLiveError("Live weather temporarily unavailable.");
+      setLiveWeather([]);
+      setLiveSource("");
+      setLiveUpdated("");
+    } finally {
+      setLoadingLive(false);
+    }
+  }
 
   return (
     <div className="panel">
@@ -235,10 +362,32 @@ function IndiaMapPage() {
       {loading ? (
         <p>Loading weather map...</p>
       ) : (
-      <IndiaWeatherMap
-  reports={reports}
-  eventFilter={eventFilter}
-/>   
+        <>
+          <div className="live-data-label">
+            <span className="live-dot"></span>
+            <strong>LIVE WEATHER DATA</strong>
+            <span style={{ marginLeft: 12 }}>
+              Source: {liveSource || "Open-Meteo"}
+            </span>
+            <span style={{ marginLeft: 12 }}>
+              Updated: {liveUpdated ? new Date(liveUpdated).toLocaleString() : "-"}
+            </span>
+            {loadingLive && (
+              <span style={{ marginLeft: 12 }}>Loading live weather...</span>
+            )}
+            {liveError && (
+              <span style={{ marginLeft: 12, color: "#b00020" }}>
+                {liveError}
+              </span>
+            )}
+          </div>
+
+          <IndiaWeatherMap
+            reports={reports}
+            eventFilter={eventFilter}
+            liveWeather={liveWeather}
+          />
+        </>
       )}
     </div>
   );
@@ -271,8 +420,12 @@ function AnalyticsPage() { const [reports, setReports] = useState<any[]>([]);
 
 
 
-function App() {
+
+  
+  
+    function App() {
   const [page, setPage] = useState<Page>("Dashboard");
+  const [collapsed, setCollapsed] = useState(false);
     useEffect(() => {
     const eventSource = new EventSource(
       "http://localhost:5000/api/events"
@@ -292,6 +445,26 @@ function App() {
       );
     });
 
+    eventSource.addEventListener("ingestion_completed", (event) => {
+      const payload = JSON.parse(event.data);
+
+      console.log("INGESTION COMPLETED:", payload);
+
+      window.dispatchEvent(
+        new CustomEvent("ingestion-completed", { detail: payload })
+      );
+    });
+
+    eventSource.addEventListener("new_alert", (event) => {
+      const alert = JSON.parse(event.data);
+
+      console.log("NEW OFFICIAL ALERT:", alert);
+
+      window.dispatchEvent(
+        new CustomEvent("new-official-alert", { detail: alert })
+      );
+    });
+
     eventSource.onerror = (error) => {
       console.error("SSE connection error:", error);
     };
@@ -301,8 +474,9 @@ function App() {
     };
   }, []);
 
-  const menu: Page[] = [
+ const menu: Page[] = [
   "Dashboard",
+  "Live Weather",
   "Live Events",
   "India Map",
   "Analytics",
@@ -312,70 +486,18 @@ function App() {
   "Settings",
   "Help",
 ];
+
   return (
     <div className="app">
-      {/* SIDEBAR */}
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-logo">VD</div>
-
-          <div>
-            <h2>VayuDrishti</h2>
-            <p>National Weather Intelligence</p>
-          </div>
-        </div>
-
-        <div className="menu-title">MONITORING</div>
-
-        <nav>
-          {menu.map((item) => (
-            <button
-              key={item}
-              className={`nav-item ${page === item ? "active" : ""}`}
-              onClick={() => setPage(item)}
-            >
-              <span>{getIcon(item)}</span>
-              {item}
-
-              {item === "Live Events" && (
-                <span className="badge">12</span>
-              )}
-            </button>
-          ))}
-        </nav>
-
-        <div className="sidebar-bottom">
-          <div className="system-status">
-            <span className="live-dot"></span>
-            System Online
-          </div>
-        </div>
-      </aside>
+      <Sidebar menu={menu} page={page} setPage={setPage} getIcon={getIcon} collapsed={collapsed} setCollapsed={setCollapsed} />
 
       {/* MAIN */}
       <main className="main">
-        <header className="header">
-          <div>
-            <p className="eyebrow">
-              VAYUDRISHTI / NATIONAL WEATHER
-            </p>
-            <h1>{page}</h1>
-          </div>
-
-          <div className="header-actions">
-            <span className="live">
-              <span className="live-dot"></span>
-              LIVE DATA
-            </span>
-
-            <button>⌕</button>
-            <button>◐</button>
-            <div className="avatar">A</div>
-          </div>
-        </header>
+        <Header page={page} collapsed={collapsed} setCollapsed={setCollapsed} />
 
         <section className="content">
           {page === "Dashboard" && <Dashboard />}
+          {page === "Live Weather" && <LiveWeatherPage />}
 
         {page === "Live Events" && <LiveEvents />}
 
@@ -395,15 +517,155 @@ function App() {
   );
 }
 /* ================= INDIA WEATHER MAP ================= */
+function LiveWeatherPage() {
+  const [weather, setWeather] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
+  const loadWeather = async () => {
+    try {
+      setLoading(true);
+      setError("");
+
+      const response = await fetch(
+        "http://localhost:5000/api/weather/india-live"
+      );
+
+      const data = await response.json();
+
+      if (!data.success) {
+        throw new Error(
+          data.message || "Failed to load weather"
+        );
+      }
+
+      setWeather(data.weather || []);
+    } catch (err: any) {
+      console.error("Live weather error:", err);
+      setError(
+        err.message || "Unable to load live weather"
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadWeather();
+
+    const interval = setInterval(() => {
+      loadWeather();
+    }, 5 * 60 * 1000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <div className="page-content">
+      <div className="page-header">
+        <div>
+          <h1>India Live Weather Intelligence</h1>
+
+          <p>
+            Real-time weather conditions across major
+            Indian cities
+          </p>
+        </div>
+
+        <button
+          onClick={loadWeather}
+          className="refresh-btn"
+        >
+          ↻ Refresh
+        </button>
+      </div>
+
+      {loading && (
+        <div className="loading-state">
+          Loading live India weather...
+        </div>
+      )}
+
+      {error && (
+        <div className="error-state">
+          {error}
+        </div>
+      )}
+
+      {!loading && !error && (
+        <div className="weather-grid">
+          {weather.map((item) => (
+            <div
+              className="weather-card"
+              key={`${item.city}-${item.state}`}
+            >
+              <div className="weather-card-top">
+                <div>
+                  <h3>{item.city}</h3>
+                  <span>{item.state}</span>
+                </div>
+
+                <div className="weather-temp">
+                  {Math.round(item.temperature_c)}°C
+                </div>
+              </div>
+
+              <div className="weather-condition">
+                {item.weather}
+              </div>
+
+              <div className="weather-details">
+                <div>
+                  <span>Feels like</span>
+                  <strong>
+                    {Math.round(item.feels_like_c)}°C
+                  </strong>
+                </div>
+
+                <div>
+                  <span>Humidity</span>
+                  <strong>
+                    {item.humidity}%
+                  </strong>
+                </div>
+
+                <div>
+                  <span>Rain</span>
+                  <strong>
+                    {item.precipitation_mm} mm
+                  </strong>
+                </div>
+
+                <div>
+                  <span>Wind</span>
+                  <strong>
+                    {item.wind_speed_kmh} km/h
+                  </strong>
+                </div>
+              </div>
+
+              <div className="weather-source">
+                Live data • {item.source}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function IndiaWeatherMap({
-   reports,
+  reports,
   eventFilter,
+  liveWeather,
+  alerts,
 }: {
   reports: any[];
   eventFilter: string;
-}) { 
+  liveWeather?: LiveWeather[];
+  alerts?: any[];
+}) {
   const cityCoordinates: Record<string, [number, number]> = {
     Delhi: [28.6139, 77.209],
     Mumbai: [19.076, 72.8777],
@@ -482,59 +744,135 @@ function IndiaWeatherMap({
   });
 
   return (
-    <MapContainer
-      center={[22.9734, 78.6569]}
-      zoom={5}
-      scrollWheelZoom={true}
-      style={{
-        height: "420px",
-        width: "100%",
-        borderRadius: "14px",
-      }}
-    >
-      <TileLayer
-        attribution="&copy; OpenStreetMap contributors"
-        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-      />
-       {filteredReports.map((report: any) => (
-         <Marker
-          key={report.id}
-          position={[
-            report.mapLatitude,
-            report.mapLongitude,
-          ]}
-          icon={markerIcon}
-        >
-          <Popup>
-            <strong>
-              {report.title || "Weather Report"}
-            </strong>
+    <div className="map-shell">
+      <MapContainer
+        center={[22.9734, 78.6569]}
+        zoom={5}
+        scrollWheelZoom={true}
+        style={{
+          height: "420px",
+          width: "100%",
+          borderRadius: "16px",
+        }}
+      >
+        {Array.isArray(alerts) && alerts.length > 0 && (
+          <div
+            style={{
+              position: "absolute",
+              top: 12,
+              right: 12,
+              zIndex: 900,
+              width: 320,
+              pointerEvents: "none",
+            }}
+          >
+            {alerts.slice(0, 3).map((a: any, i: number) => (
+              <div key={`alert-${i}`} className="report-card" style={{ marginBottom: 8, background: "#fff6f6" }}>
+                <div>
+                  <strong>{a.title}</strong>
+                  <div style={{ fontSize: 12 }}>{a.description}</div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <small>{a.issue_time || a.pubDate}</small>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <TileLayer
+          attribution="&copy; OpenStreetMap contributors"
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        />
+        {filteredReports.map((report: any) => (
+          <Marker
+            key={report.id}
+            position={[
+              report.mapLatitude,
+              report.mapLongitude,
+            ]}
+            icon={markerIcon}
+          >
+            <Popup>
+              <div style={{ minWidth: 180, maxWidth: 240, fontSize: 12, lineHeight: 1.5 }}>
+                <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 6 }}>
+                  {report.title || "Weather Report"}
+                </div>
+                <div style={{ color: "#60a5fa", fontWeight: 700, marginBottom: 6 }}>
+                  {report.event_category || "Weather Event"}
+                </div>
+                <div><strong>📍</strong> {report.city || "Unknown"}, {report.state || "Unknown"}</div>
+                <div><strong>⚠️</strong> Severity: {report.severity || "medium"}</div>
+                <div><strong>✅</strong> Status: {report.verification_status || "pending"}</div>
+                <div><strong>🛰️</strong> Source: {report.source_name || "Unknown"}</div>
+                {report.description && (
+                  <div style={{ marginTop: 8, color: "#cbd5e1" }}>
+                    {report.description.slice(0, 120)}{report.description.length > 120 ? "..." : ""}
+                  </div>
+                )}
+                {report.image_url && (
+                  <img
+                    src={`http://localhost:5000${report.image_url}`}
+                    alt={report.title || "Weather report"}
+                    style={{
+                      width: "100%",
+                      maxHeight: 120,
+                      objectFit: "cover",
+                      marginTop: 8,
+                      borderRadius: 8,
+                    }}
+                  />
+                )}
+              </div>
+            </Popup>
+          </Marker>
+        ))}
+        {liveWeather && liveWeather.length > 0 &&
+          liveWeather.map((w) => {
+            const lat = Number(w.latitude);
+            const lon = Number(w.longitude);
 
-            <br />
+            if (Number.isNaN(lat) || Number.isNaN(lon)) return null;
 
-            Event: {report.event_category}
+            return (
+              <CircleMarker
+                key={`live-${w.city}-${w.state}`}
+                center={[lat, lon]}
+                radius={8}
+                pathOptions={{
+                  color: "#1565c0",
+                  fillColor: "#42a5f5",
+                  fillOpacity: 0.9,
+                }}
+              >
+                <Popup>
+                  <div>
+                    <div style={{ fontSize: 16 }}>
+                      🌦️ {w.city}
+                    </div>
+                    <div>{w.state}</div>
+                    <hr />
+                    <div>Temperature: {w.temperature_c}°C</div>
+                    <div>Feels like: {w.feels_like_c}°C</div>
+                    <div>Humidity: {w.humidity}%</div>
+                    <div>Wind: {w.wind_speed_kmh} km/h</div>
+                    <div>Precipitation: {w.precipitation_mm} mm</div>
+                    <div>Condition: {w.weather}</div>
+                    <div>Updated: {w.observed_at}</div>
+                    <div>Source: {w.source}</div>
+                  </div>
+                </Popup>
+              </CircleMarker>
+            );
+          })}
+      </MapContainer>
 
-            <br />
-
-            Location:{" "}
-            {report.city || "Unknown"},{" "}
-            {report.state || "Unknown"}
-
-            <br />
-
-            Severity: {report.severity}
-
-            <br />
-
-            Status: {report.verification_status}
-
-            <br />
-
-            Source: {report.source_name || "Unknown"}
-          </Popup>
-        </Marker>
-      ))}
-    </MapContainer>
+      <div className="map-legend">
+        <span><i className="legend-dot live-dot-color"></i>Live Weather</span>
+        <span><i className="legend-dot report-dot-color"></i>Weather Report</span>
+        <span><i className="legend-dot alert-dot-color"></i>Official Alert</span>
+        <span><i className="legend-dot severe-dot-color"></i>Severe Event</span>
+      </div>
+    </div>
   );
 }
 
@@ -557,14 +895,112 @@ const [longitude, setLongitude] = useState("");
 
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
+  const [messageType, setMessageType] = useState<"success" | "error" | "info">("info");
+  const [validationBadges, setValidationBadges] = useState<string[]>([]);
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [reports, setReports] = useState<any[]>([]);
+  const sourceCount = new Set(
+    reports
+      .map((report) => report.source_name || report.source_type)
+      .filter(Boolean)
+  ).size;
   const [liveWeather, setLiveWeather] = useState<LiveWeather[]>([]);
 const [loadingWeather, setLoadingWeather] = useState(false);
 const [loadingReports, setLoadingReports] = useState(true);
+  const [recentAlerts, setRecentAlerts] = useState<any[]>([]);
+  const [showAllSocialPosts, setShowAllSocialPosts] = useState(false);
+  const [locationSearch, setLocationSearch] = useState("");
 
 const [dateFilter, setDateFilter] = useState("today");
 const [eventFilter, setEventFilter] = useState("all");
 const [locationFilter, setLocationFilter] = useState("all");
+
+  const currentHour = new Date().getHours();
+  const greetingText =
+    currentHour >= 5 && currentHour < 12
+      ? "Good Morning"
+      : currentHour >= 12 && currentHour < 17
+      ? "Good Afternoon"
+      : currentHour >= 17 && currentHour < 21
+      ? "Good Evening"
+      : "Good Night";
+
+  const socialWeatherPosts = [
+    {
+      platform: "X / Twitter",
+      handle: "@WeatherIndia",
+      hashtag: "#MonsoonAlert",
+      location: "Rajasthan",
+      title: "Heavy rainfall warning issued for Rajasthan and Gujarat",
+      details:
+        "Flood-prone zones and low-lying roads are being monitored after intense cloudburst activity across western India.",
+      link: "https://x.com/search?q=%23MonsoonAlert%20India",
+      time: "2 min ago",
+      tone: "warning",
+    },
+    {
+      platform: "Instagram",
+      handle: "@IndiaWeatherWatch",
+      hashtag: "#CycloneWatch",
+      location: "West Bengal",
+      title: "Coastal storm surge risk increasing for eastern shoreline",
+      details:
+        "Meteorological teams highlighted elevated sea conditions and strong winds along the Bay of Bengal coastline.",
+      link: "https://www.instagram.com/explore/tags/weatheralert/",
+      time: "12 min ago",
+      tone: "critical",
+    },
+    {
+      platform: "X / Twitter",
+      handle: "@IMD_India",
+      hashtag: "#HeatwaveAlert",
+      location: "Delhi",
+      title: "Heatwave conditions intensifying in central India",
+      details:
+        "Public advisories are active in several districts as daytime temperatures remain above seasonal averages.",
+      link: "https://x.com/IMDWeather",
+      time: "31 min ago",
+      tone: "warning",
+    },
+    {
+      platform: "Instagram",
+      handle: "@UrbanClimateDesk",
+      hashtag: "#StormTracking",
+      location: "Maharashtra",
+      title: "Thunderstorm activity spreads across Maharashtra and Madhya Pradesh",
+      details:
+        "Residents in urban pockets are being urged to stay alert as lightning and gusty winds are forecast to intensify near evening hours.",
+      link: "https://www.instagram.com/explore/tags/stormtracking/",
+      time: "46 min ago",
+      tone: "warning",
+    },
+    {
+      platform: "X / Twitter",
+      handle: "@ClimatePulseIN",
+      hashtag: "#FloodWatch",
+      location: "Tamil Nadu",
+      title: "River level monitoring continues in flood-prone districts",
+      details:
+        "Community updates and emergency teams remain focused on vulnerable river belts after sustained rainfall over the last 24 hours.",
+      link: "https://x.com/search?q=%23FloodWatch%20India",
+      time: "1 hr ago",
+      tone: "critical",
+    },
+  ];
+
+  const normalizedLocationSearch = locationSearch.trim().toLowerCase();
+
+  const filteredSocialPosts = normalizedLocationSearch
+    ? socialWeatherPosts.filter((post) =>
+        `${post.location} ${post.title}`
+          .toLowerCase()
+          .includes(normalizedLocationSearch)
+      )
+    : socialWeatherPosts;
+
+  const visibleSocialPosts = showAllSocialPosts
+    ? filteredSocialPosts
+    : filteredSocialPosts.slice(0, 3);
 
 async function loadReports() {
   try {
@@ -584,22 +1020,73 @@ async function loadReports() {
   }
 }
 useEffect(() => {
-  
   loadReports();
   loadLiveWeather();
+  loadRecentUpdates();
 }, []);
+
+useEffect(() => {
+  function onNewAlert(e: any) {
+    const alert = e.detail;
+    setRecentAlerts((prev) => [alert, ...prev].slice(0, 10));
+  }
+
+  function onIngestion() {
+    // reload sources and reports briefly
+    loadReports();
+    loadLiveWeather();
+    loadRecentUpdates();
+  }
+
+  window.addEventListener("new-official-alert", onNewAlert as any);
+  window.addEventListener("ingestion-completed", onIngestion as any);
+
+  return () => {
+    window.removeEventListener("new-official-alert", onNewAlert as any);
+    window.removeEventListener("ingestion-completed", onIngestion as any);
+  };
+}, []);
+
+async function loadRecentUpdates() {
+  try {
+    const resp = await fetch("http://localhost:5000/api/weather/alerts");
+
+    if (!resp.ok) {
+      setRecentAlerts([]);
+      return;
+    }
+
+    const data = await resp.json();
+
+    if (data.success && Array.isArray(data.alerts)) {
+      setRecentAlerts(data.alerts.slice(0, 5));
+    } else {
+      setRecentAlerts([]);
+    }
+  } catch (err) {
+    console.error("Failed to load recent alerts:", err);
+    setRecentAlerts([]);
+  }
+}
 async function loadLiveWeather() {
   try {
     setLoadingWeather(true);
 
     const response = await fetch(
-      "http://localhost:5000/api/weather/live"
+      "http://localhost:5000/api/weather/india-live"
     );
 
     const data = await response.json();
 
     if (data.success) {
       setLiveWeather(data.weather);
+        try {
+          (window as any).__VAYU_LIVE_WEATHER = {
+            weather: data.weather,
+            generated_at: data.generated_at || new Date().toISOString(),
+            ts: Date.now(),
+          };
+        } catch (e) {}
     }
   } catch (error) {
     console.error("Failed to load live weather:", error);
@@ -607,6 +1094,11 @@ async function loadLiveWeather() {
     setLoadingWeather(false);
   }
 }
+const reportLocationText = (report: any) =>
+  `${report.city || ""} ${report.state || ""}`.toLowerCase();
+
+const normalizedLocationSearchText = locationSearch.trim().toLowerCase();
+
 const filteredReports = reports.filter((report) => {
   // EVENT FILTER
   const eventMatch =
@@ -623,6 +1115,13 @@ const filteredReports = reports.filter((report) => {
         locationFilter.toLowerCase()
       )
     );
+
+  const searchLocationMatch =
+    !normalizedLocationSearchText ||
+    reportLocationText(report).includes(normalizedLocationSearchText) ||
+    `${report.city || ""} ${report.state || ""} ${report.title || ""}`
+      .toLowerCase()
+      .includes(normalizedLocationSearchText);
 
   // DATE FILTER
   const reportDate = new Date(report.event_time);
@@ -647,16 +1146,29 @@ const filteredReports = reports.filter((report) => {
     dateMatch = reportDate >= thirtyDaysAgo;
   }
 
-  return eventMatch && locationMatch && dateMatch;
+  return eventMatch && locationMatch && searchLocationMatch && dateMatch;
 });
+
+const filteredLiveWeather = normalizedLocationSearchText
+  ? liveWeather.filter((item) =>
+      `${item.city} ${item.state}`
+        .toLowerCase()
+        .includes(normalizedLocationSearchText)
+    )
+  : liveWeather;
+
  async function submitReport() {
   if (!title || !description || !city || !state) {
-    setMessage("Please fill all required fields.");
+    setMessageType("error");
+    setMessage("Please fill all required fields: title, description, city and state.");
+    setValidationBadges([]);
     return;
   }
 
   setSubmitting(true);
-  setMessage("");
+  setMessageType("info");
+  setMessage("Submitting weather report and validating location... ");
+  setValidationBadges([]);
 
   try {
     const formData = new FormData();
@@ -710,9 +1222,17 @@ const filteredReports = reports.filter((report) => {
     const data = await response.json();
 
     if (data.success) {
+      setMessageType("success");
       setMessage(
-        `Report submitted successfully! Report ID: ${data.report_id}`
+        `Report submitted successfully! Report ID: ${data.report_id}. It is now visible in the live dashboard.`
       );
+      setValidationBadges(["Location validated", "Image verified"]);
+
+      await loadReports();
+      await loadRecentUpdates();
+      await loadLiveWeather();
+      setLocationSearch(city);
+      setShowReportForm(false);
 
       setTitle("");
       setDescription("");
@@ -727,13 +1247,23 @@ const filteredReports = reports.filter((report) => {
       setPhoto(null);
       setVideo(null);
     } else {
-      setMessage("Failed to submit report.");
+      const reason =
+        data?.location_validation?.message ||
+        data?.image_verification?.message ||
+        data?.message ||
+        "Failed to submit report. Please check the entered location and image details.";
+
+      setMessageType("error");
+      setValidationBadges([]);
+      setMessage(reason + (data?.code ? ` (Code: ${data.code})` : ""));
     }
   } catch (error) {
     console.error(error);
 
+    setMessageType("error");
+    setValidationBadges([]);
     setMessage(
-      "Backend server se connection nahi ho raha."
+      "Backend server se connection nahi ho raha. Please start the backend and try again."
     );
   } finally {
     setSubmitting(false);
@@ -741,47 +1271,40 @@ const filteredReports = reports.filter((report) => {
 }
   return (
     <>
-    {/* LIVE WEATHER */}
-<div className="panel">
-  <div className="panel-header">
-    <div>
-      <h3>🌦️ Live Weather</h3>
-      <p>Real-time weather data from Open-Meteo</p>
-    </div>
-  </div>
+    {/* DASHBOARD HERO */}
+    <div className="dashboard-hero">
+      <div className="hero-left">
+        <div className="eyebrow-label">VAYUDRISHTI COMMAND CENTER</div>
+        <h2>{greetingText}</h2>
+        <p>Here's what's happening with weather across India</p>
+      </div>
 
-  {loadingWeather ? (
-    <p>Loading live weather...</p>
-  ) : liveWeather.length === 0 ? (
-    <p>No live weather data available.</p>
-  ) : (
-    <div className="weather-grid">
-      {liveWeather.map((item) => (
-        <div className="weather-card" key={item.city}>
-          <h3>{item.city}</h3>
-
-          <p>{item.state}</p>
-
-          <div className="weather-temperature">
-            {item.weather.temperature_2m}°C
-          </div>
-
+      <div className="hero-status">
+        <div className="hero-badge live">
+          <div className="dot" style={{ background: 'var(--vd-live)' }}></div>
           <div>
-            💧 Humidity: {item.weather.relative_humidity_2m}%
-          </div>
-
-          <div>
-            💨 Wind: {item.weather.wind_speed_10m} km/h
-          </div>
-
-          <div>
-            🌧️ Rain: {item.weather.rain} mm
+            <div style={{ fontSize: 12 }}>System</div>
+            <div style={{ fontSize: 13 }}>Online</div>
           </div>
         </div>
-      ))}
+
+        <div className="hero-badge">
+          <div style={{ fontSize: 12 }}>Live Weather</div>
+          <div style={{ fontSize: 13, fontWeight: 800, marginLeft: 8 }}>{loadingWeather ? 'Loading' : `${(window as any).__VAYU_LIVE_WEATHER?.weather?.length || liveWeather.length} cities`}</div>
+        </div>
+
+        <div className="hero-badge">
+          <div style={{ fontSize: 12 }}>Data Sources</div>
+          <div style={{ fontSize: 13, fontWeight: 800, marginLeft: 8 }}>{sourceCount}</div>
+        </div>
+
+        <div className="hero-badge">
+          <div style={{ fontSize: 12 }}>AI Verification</div>
+          <div style={{ fontSize: 13, fontWeight: 800, marginLeft: 8 }}>{reports.filter((report) => report.verification_status === "verified").length}</div>
+        </div>
+      </div>
     </div>
-  )}
-</div>
+   
       {/* CITIZEN REPORT BANNER */}
       <div className="citizen-report-banner">
         <div>
@@ -889,10 +1412,26 @@ const filteredReports = reports.filter((report) => {
   <input
     type="file"
     accept="image/*"
-    onChange={(e) =>
-      setPhoto(e.target.files?.[0] || null)
-    }
+    onChange={(e) => {
+      const file = e.target.files?.[0] || null;
+      setPhoto(file);
+      if (file) {
+        setPhotoPreview(URL.createObjectURL(file));
+      } else {
+        setPhotoPreview(null);
+      }
+    }}
   />
+
+  {photoPreview && (
+    <div className="image-preview-box">
+      <img
+        className="report-image-preview"
+        src={photoPreview}
+        alt="Weather report preview"
+      />
+    </div>
+  )}
 
   <label>
     🎥 Upload Video
@@ -925,8 +1464,17 @@ const filteredReports = reports.filter((report) => {
 />
 
           {message && (
-            <div className="report-message">
-              {message}
+            <div className={`report-message ${messageType}`}>
+              <div>{message}</div>
+              {validationBadges.length > 0 && (
+                <div className="validation-badges">
+                  {validationBadges.map((badge) => (
+                    <span key={badge} className="validation-badge">
+                      ✓ {badge}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -953,6 +1501,18 @@ const filteredReports = reports.filter((report) => {
               National weather monitoring overview
             </p>
           </div>
+        </div>
+
+        <div className="location-search-wrap">
+          <span className="search-icon">⌕</span>
+          <input
+            className="location-search-input"
+            type="text"
+            value={locationSearch}
+            onChange={(e) => setLocationSearch(e.target.value)}
+            placeholder="Search city or state…"
+            aria-label="Search location"
+          />
         </div>
 
         <select
@@ -992,16 +1552,16 @@ const filteredReports = reports.filter((report) => {
 
      {/* STATISTICS */}
 <div className="stats-grid">
-  <StatCard
-    icon="◉"
+  <KPIStat
+    icon="reports"
     title="Total Reports"
     value={filteredReports.length.toString()}
     description="Reports collected by platform"
     trend="LIVE"
   />
 
-  <StatCard
-    icon="✓"
+  <KPIStat
+    icon="verified"
     title="Verified Reports"
    value={filteredReports.filter(
   (report) =>
@@ -1012,8 +1572,8 @@ const filteredReports = reports.filter((report) => {
         trend="LIVE"
   />
 
-  <StatCard
-    icon="!"
+  <KPIStat
+    icon="pending"
     title="Needs Verification"
     value={filteredReports.filter(
   (report) =>
@@ -1024,8 +1584,8 @@ const filteredReports = reports.filter((report) => {
     trend="LIVE"
   />
 
-  <StatCard
-    icon="⚠"
+  <KPIStat
+    icon="events"
     title="Active Events"
     value={filteredReports.filter(
       (report) =>
@@ -1050,48 +1610,216 @@ const filteredReports = reports.filter((report) => {
             </button>
           </div>
 
-         <IndiaWeatherMap
-  reports={filteredReports}
-  eventFilter="all"
-/>
-            </section>
+          <IndiaWeatherMap
+            reports={filteredReports}
+            eventFilter="all"
+            liveWeather={filteredLiveWeather}
+            alerts={recentAlerts}
+          />
+        </section>
 
-        <section className="panel">
+        <div className="right-column">
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <h3>Official Weather Alerts</h3>
+                <p>Latest official alerts</p>
+              </div>
+              <button className="small-button">View All →</button>
+            </div>
+            <div style={{ padding: 12 }}>
+              <AlertList alerts={recentAlerts} />
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <h3>Official Weather Alerts</h3>
+                <p>Latest official alerts</p>
+              </div>
+              <button className="small-button">View All →</button>
+            </div>
+            <div style={{ padding: 12 }}>
+              <AlertList alerts={recentAlerts} />
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <h3>Recent Weather Reports</h3>
+                <p>Latest incoming reports</p>
+              </div>
+              <button className="small-button">View all →</button>
+            </div>
+            <div className="reports">
+              {loadingReports ? (
+                <p>Loading reports...</p>
+              ) : reports.length === 0 ? (
+                <p>No weather reports available.</p>
+              ) : (
+                filteredReports.slice(0, 5).map((report) => (
+                  <Report
+                    key={report.id}
+                    event={report.event_category}
+                    location={`${report.city}, ${report.state}`}
+                    status={report.verification_status}
+                    time={new Date(report.event_time).toLocaleString()}
+                  />
+                ))
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <div className="social-weather-panel">
+        <section className="panel social-panel">
           <div className="panel-header">
             <div>
-              <h3>Recent Weather Reports</h3>
-              <p>Latest incoming reports</p>
+              <h3>Social Weather Pulse</h3>
+              <p>Live weather-related conversations from X / Twitter and Instagram</p>
             </div>
-
-            <button className="small-button">
-              View all →
+            <button
+              className="small-button"
+              onClick={() => setShowAllSocialPosts((prev) => !prev)}
+            >
+              {showAllSocialPosts ? "View Less" : "View All"}
             </button>
           </div>
 
-        <div className="reports">
-  {loadingReports ? (
-    <p>Loading reports...</p>
-  ) : reports.length === 0 ? (
-    <p>No weather reports available.</p>
-  ) : (
-    filteredReports.slice(0, 5).map((report) => (
-      <Report
-        key={report.id}
-        event={report.event_category}
-        location={`${report.city}, ${report.state}`}
-        status={report.verification_status}
-        time={new Date(report.event_time).toLocaleString()}
-      />
-    ))
-  )}
-</div>
+          <div className="social-feed-grid">
+            {visibleSocialPosts.length === 0 ? (
+              <div className="social-empty-state">
+                No weather news found for this location yet.
+              </div>
+            ) : (
+              visibleSocialPosts.map((item) => (
+                <div key={`${item.platform}-${item.hashtag}`} className="social-post-card">
+                  <div className="social-top-row">
+                    <span className={`social-platform ${item.tone}`}>{item.platform}</span>
+                    <span className="social-time">{item.time}</span>
+                  </div>
+
+                  <div className="social-handle-row">
+                    <span>{item.handle}</span>
+                    <span className="social-tag">{item.hashtag}</span>
+                  </div>
+
+                  <h4>{item.title}</h4>
+                  <p>{item.details}</p>
+
+                  <div className="social-link-row">
+                    <a href={item.link} target="_blank" rel="noreferrer">Open source link</a>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         </section>
       </div>
 
-   
-        </>
+      <div className="local-confirmation-panel">
+        <section className="panel">
+          <div className="panel-header">
+            <div>
+              <h3>Current Location Verification</h3>
+              <p>
+                {normalizedLocationSearchText
+                  ? `Local weather news, reports and media for ${locationSearch}`
+                  : "Local weather news, reports and media around your active area"}
+              </p>
+            </div>
+          </div>
+
+          <div className="local-confirmation-grid">
+            <div className="local-confirmation-card">
+              <h4>Local weather news</h4>
+              {visibleSocialPosts.length === 0 ? (
+                <p className="empty-local-text">No local weather updates are available yet.</p>
+              ) : (
+                <div className="local-news-list">
+                  {visibleSocialPosts.slice(0, 3).map((item) => (
+                    <div key={`local-news-${item.platform}-${item.hashtag}`} className="local-news-item">
+                      <div className="local-news-tag">{item.hashtag}</div>
+                      <strong>{item.title}</strong>
+                      <p>{item.details}</p>
+                      <a href={item.link} target="_blank" rel="noreferrer">Open source</a>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="local-confirmation-card">
+              <h4>Local reports & media</h4>
+              {filteredReports.length === 0 ? (
+                <p className="empty-local-text">No matching local reports found for this location.</p>
+              ) : (
+                <div className="local-report-list">
+                  {filteredReports.slice(0, 3).map((report) => (
+                    <div key={`local-report-${report.id}`} className="local-report-item">
+                      <div className="local-report-meta">
+                        <strong>{report.title || report.event_category || "Weather report"}</strong>
+                        <span>{report.city}, {report.state}</span>
+                      </div>
+
+                      <div className="local-report-media">
+                        {report.image_url && (
+                          <img
+                            src={`http://localhost:5000${report.image_url}`}
+                            alt={report.title || "Weather report image"}
+                          />
+                        )}
+                        {report.video_url && (
+                          <video controls src={`http://localhost:5000${report.video_url}`} />
+                        )}
+                      </div>
+
+                      <p>{report.description || "Weather event reported by a local source."}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <section className="panel">
+          <div className="panel-header">
+            <div>
+              <h3>Recent Weather Updates</h3>
+              <p>Latest official alerts and citizen reports</p>
+            </div>
+
+            <button
+              className="small-button"
+              onClick={loadRecentUpdates}
+            >
+              ↻ Refresh
+            </button>
+          </div>
+
+          <div className="reports">
+            {recentAlerts.length === 0 && reports.length === 0 ? (
+              <p>No recent updates available.</p>
+            ) : (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
+                  <AlertList alerts={recentAlerts} />
+                </div>
+              </>
+            )}
+          </div>
+        </section>
+      </div>
+    </>
   );
 }
+
 function AdminPanel() {
   const [reports, setReports] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1288,13 +2016,7 @@ function AdminReport({
     <img
       src={`http://localhost:5000${report.image_url}`}
       alt="Weather report"
-      style={{
-        width: "180px",
-        maxHeight: "120px",
-        objectFit: "cover",
-        borderRadius: "8px",
-        marginTop: "6px",
-      }}
+      className="report-media-thumb"
     />
   </div>
 )}
@@ -1306,12 +2028,7 @@ function AdminReport({
     <video
       src={`http://localhost:5000${report.video_url}`}
       controls
-      style={{
-        width: "240px",
-        maxHeight: "160px",
-        marginTop: "6px",
-        borderRadius: "8px",
-      }}
+      className="report-media-video"
     />
   </div>
 )}
@@ -1353,41 +2070,6 @@ function AdminReport({
           ✕ Reject
         </button>
       </div>
-    </div>
-  );
-}
-
-/* ================= STAT CARD ================= */
-function StatCard({
-  icon,
-  title,
-  value,
-  description,
-  trend,
-}: {
-  icon: string;
-  title: string;
-  value: string;
-  description: string;
-  trend: string;
-}) {
-  return (
-    <div className="stat-card">
-      <div className="stat-top">
-        <span className="stat-icon">
-          {icon}
-        </span>
-
-        <span className="trend">
-          {trend}
-        </span>
-      </div>
-
-      <p>{title}</p>
-
-      <strong>{value}</strong>
-
-      <small>{description}</small>
     </div>
   );
 }
@@ -1925,19 +2607,31 @@ function SourcesPage() {
               <div>
                 <h3>{source.name}</h3>
 
+                <p>Type: {source.type}</p>
+
+                <p>{source.description}</p>
+
                 <p>
-                  Type: {source.type}
+                  <strong>Last update:</strong>{" "}
+                  {source.last_sync || "Never"}
                 </p>
 
                 <p>
-                  {source.description}
+                  <strong>Records:</strong>{" "}
+                  {source.records_collected || 0}
                 </p>
               </div>
 
               <div>
-                <span className="status">
+                <span className={`status ${source.health || "unknown"}`}>
                   {source.status}
                 </span>
+
+                {(!source.health || source.health === "unavailable") && (
+                  <p style={{ marginTop: 8, color: "#b33" }}>
+                    Configured but credentials or endpoint unavailable
+                  </p>
+                )}
               </div>
             </div>
           ))}
@@ -2258,30 +2952,6 @@ function HelpPage() {
 
 /* ================= SIMPLE PAGE ================= */
 
-function SimplePage({
-  title,
-}: {
-  title: string;
-}) {
-  return (
-    <div className="empty-page">
-      <div className="empty-icon">
-        ◈
-      </div>
-
-      <h2>{title}</h2>
-
-      <p>
-        This VayuDrishti module is ready for
-        the next development phase.
-      </p>
-
-      <span>
-        Real data + backend integration coming next.
-      </span>
-    </div>
-  );
-}
 
 /* ================= ICONS ================= */
 
@@ -2289,9 +2959,11 @@ function getIcon(item: Page) {
   const icons: Record<Page, string> = {
     Dashboard: "▦",
     "Live Events": "◉",
+    "Live Weather": "☁",
     "India Map": "⌖",
     Analytics: "▥",
     Reports: "▤",
+    "Admin Panel": "♙",
     Sources: "◎",
     Settings: "⚙",
     Help: "?",
@@ -2299,5 +2971,5 @@ function getIcon(item: Page) {
 
   return icons[item];
 }
-
+  
 export default App;

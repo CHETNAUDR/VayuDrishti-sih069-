@@ -4,8 +4,6 @@ This template provides a minimal setup to get React working in Vite with HMR and
 
 Currently, two official plugins are available:
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
 ## React Compiler
 
@@ -72,4 +70,60 @@ export default defineConfig([
   },
 ])
 
+## Backend (VayuDrishti)
+
+Quick start for the backend server used for report ingestion and verification.
+
+- Install dependencies for backend:
+
+```powershell
+cd backend
+npm install
+cd ..
+npm install
+```
+
+- Start backend from repo root (recommended):
+
+```powershell
+# starts the backend via the root entrypoint
+npm run start:backend
+```
+
+- Or start directly from backend folder:
+
+```powershell
+cd backend
+npm run dev
+```
+
+Environment variables
+- Add a `.env` file in `backend/` for API keys and toggles.
+- To allow permissive submissions when city/state geocoding fails, set:
+
+```
+RELAX_LOCATION_VALIDATION=1
+```
+
+When `RELAX_LOCATION_VALIDATION` is enabled, reports that fail location validation (invalid city/state, coordinate mismatch, or photo GPS mismatch) will still be accepted and saved, but will be marked with a location-warning so they can be reviewed manually.
+
+Submitting reports
+- Use multipart `POST` to `/api/reports` with form fields like `title`, `description`, `event_category`, `city`, `state`, `latitude`, `longitude`, `event_time` and optional `photo`/`video` files.
+- Example (PowerShell):
+
+```powershell
+curl.exe -X POST http://localhost:5000/api/reports \
+  -F "source_type=public" \
+  -F "source_name=test" \
+  -F "title=test report" \
+  -F "description=test description" \
+  -F "event_category=rain" \
+  -F "city=TestCity" \
+  -F "state=TestState" \
+  -F "latitude=12.34" \
+  -F "longitude=56.78" \
+  -F "event_time=2026-09-14T00:00:00Z"
+```
+
+If the location is invalid, the API will return `400` with `code: "invalid_location"` unless `RELAX_LOCATION_VALIDATION` is enabled.
 ```

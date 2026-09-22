@@ -1,3 +1,5 @@
+const socialConfig = require("./socialConfig");
+
 const SOURCES = [
   {
     id: "open_meteo",
@@ -53,7 +55,28 @@ health: "healthy",
 ];
 
 function getSources() {
-  return SOURCES;
+  // Return a shallow copy so callers can't mutate the internal array
+  const out = JSON.parse(JSON.stringify(SOURCES));
+
+  // Reflect social config availability
+  const social = out.find((s) => s.id === "social_feed");
+
+  if (social) {
+    if (!socialConfig.enabled) {
+      social.status = "configured_but_disabled";
+      social.description += " (disabled in configuration)";
+      social.health = "unavailable";
+    } else if (!socialConfig.instanceUrl) {
+      social.status = "configured_but_unavailable";
+      social.description += " (instance URL or credentials missing)";
+      social.health = "unavailable";
+    } else {
+      social.status = "active";
+      social.health = social.health || "healthy";
+    }
+  }
+
+  return out;
 }
 
 function updateSourceStatus(

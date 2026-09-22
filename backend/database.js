@@ -100,6 +100,14 @@ if (!columns.includes("evidence_summary")) {
   );
 }
 
+if (!columns.includes("intelligence_score")) {
+  db.exec(`ALTER TABLE reports ADD COLUMN intelligence_score INTEGER DEFAULT 0`);
+}
+
+if (!columns.includes("intelligence_reasons")) {
+  db.exec(`ALTER TABLE reports ADD COLUMN intelligence_reasons TEXT`);
+}
+
 console.log("VayuDrishti database initialized successfully.");
 
 module.exports = db;
