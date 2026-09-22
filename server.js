@@ -4,9 +4,10 @@
 // root package.json uses ESM (`type: "module"`).
 import { spawn } from "child_process";
 
-const child = spawn(process.execPath, ["backend/server.js"], {
-	stdio: "inherit",
+const PORT = process.env.PORT || 5000;
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(
+    `VayuDrishti backend running on port ${PORT}`
+  );
 });
-
-child.on("close", (code) => process.exit(code));
-
